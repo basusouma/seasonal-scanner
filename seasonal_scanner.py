@@ -54,10 +54,10 @@ hold_days = st.sidebar.slider("Holding period (trading days)", 3, 10, 10)
 tickers_text = st.sidebar.text_area("Tickers (comma separated)",
                                     DEFAULT_TICKERS, height=150)
 min_years = st.sidebar.slider(
-    "Minimum years of history", 4, 25, 8,
-    help="Lower this to include young stocks (RKLB, RDW, CEG, PR, CRDO...). "
-         "Warning: seasonal stats on <10 samples are close to meaningless — "
-         "for young names, trust the Trend/Setup/Risk pillars instead.")
+    "Years needed for full seasonal weight", 4, 25, 20,
+    help="Stocks with fewer years are NOT excluded — their Seasonal pillar "
+         "is set to a neutral 50 (neither helps nor hurts) and they are "
+         "ranked on Trend/Setup/Risk/News. Marked with * in results.")
 check_extras = st.sidebar.slider("Earnings+news lookups for top N (slower)",
                                  5, 30, 15)
 run = st.sidebar.button("Run scan", type="primary")
@@ -114,6 +114,11 @@ def scale(x, lo, hi):
 def grade(score):
     return ("A" if score >= 75 else "B" if score >= 65 else
             "C" if score >= 55 else "D" if score >= 45 else "F")
+
+
+def rnd(x, d=1):
+    """Round, returning None for missing values so tables stay clean."""
+    return None if x is None or (isinstance(x, float) and pd.isna(x)) else round(x, d)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
@@ -205,27 +210,37 @@ for t in tickers:
     if t not in closes.columns:
         continue
     px = closes[t].dropna()
-    if len(px) < 210:
+    if len(px) < 30:      # truly no usable data (brand-new or bad ticker)
         continue
     stock = week_returns(px, anchor.month, anchor.day,
                          first_year, this_year - 1, hold_days)
     common = [yr for yr in stock if yr in spx_seasonal]
-    if len(common) < min_years:
-        continue
     n = len(common)
-    rets = [stock[yr] for yr in common]
-    excess = [stock[yr] - spx_seasonal[yr] for yr in common]
-    win_pct = 100 * sum(1 for r in rets if r > 0) / n
-    beat_pct = 100 * sum(1 for e in excess if e > 0) / n
-    avg_ret = sum(rets) / n
-    avg_ex = sum(excess) / n
-    sd = (sum((e - avg_ex) ** 2 for e in excess) / (n - 1)) ** 0.5
-    tstat = avg_ex / (sd / math.sqrt(n)) if sd > 0 else 0.0
+    has_seasonal = n >= min_years
 
-    # Trend
+    if n >= 4:            # enough samples to compute stats at all
+        rets = [stock[yr] for yr in common]
+        excess = [stock[yr] - spx_seasonal[yr] for yr in common]
+        win_pct = 100 * sum(1 for r in rets if r > 0) / n
+        beat_pct = 100 * sum(1 for e in excess if e > 0) / n
+        avg_ret = sum(rets) / n
+        avg_ex = sum(excess) / n
+        sd = (sum((e - avg_ex) ** 2 for e in excess) / (n - 1)) ** 0.5
+        tstat = avg_ex / (sd / math.sqrt(n)) if sd > 0 else 0.0
+    else:
+        rets = []
+        win_pct = beat_pct = avg_ret = avg_ex = tstat = float("nan")
+
+    # Seasonal pillar: neutral 50 when history is insufficient
+    if has_seasonal:
+        seasonal_s = 0.35 * win_pct + 0.35 * beat_pct + 0.30 * scale(tstat, 0, 3)
+    else:
+        seasonal_s = 50.0
+
+    # Trend (use whatever history exists; missing pieces default neutral)
     last = float(px.iloc[-1])
-    dma50 = float(px.tail(50).mean())
-    dma200 = float(px.tail(200).mean())
+    dma50 = float(px.tail(min(50, len(px))).mean())
+    dma200 = float(px.tail(min(200, len(px))).mean())
     mom1m = (last / float(px.iloc[-22]) - 1) * 100 if len(px) > 22 else float("nan")
     mom3m = (last / float(px.iloc[-64]) - 1) * 100 if len(px) > 64 else float("nan")
 
@@ -264,15 +279,17 @@ for t in tickers:
 
     rets_map[t], price_map[t] = sorted(rets), last
     rows.append({
-        "Ticker": t, "Years": n, "Win %": round(win_pct, 1),
-        "Beat %": round(beat_pct, 1), "Avg Ret %": round(avg_ret, 2),
-        "Avg Excess %": round(avg_ex, 2), "t-stat": round(tstat, 2),
+        "Ticker": t,
+        "Data": f"{n}y" + ("" if has_seasonal else " *"),
+        "Win %": rnd(win_pct), "Beat %": rnd(beat_pct),
+        "Avg Ret %": rnd(avg_ret, 2), "Avg Excess %": rnd(avg_ex, 2),
+        "t-stat": rnd(tstat, 2),
         ">50DMA": "Y" if last > dma50 else "N",
         ">200DMA": "Y" if last > dma200 else "N",
-        "1M %": round(mom1m, 1), "3M %": round(mom3m, 1),
-        "RSI14": round(rsi14, 1), "RSI2": round(rsi2, 1),
-        "Vol vs 30d": round(vol_ratio, 2) if not pd.isna(vol_ratio) else None,
-        "AnnVol %": round(ann_vol, 1),
+        "1M %": rnd(mom1m), "3M %": rnd(mom3m),
+        "RSI14": rnd(rsi14), "RSI2": rnd(rsi2),
+        "Vol vs 30d": rnd(vol_ratio, 2),
+        "AnnVol %": rnd(ann_vol),
         "_seasonal": seasonal_s, "_trend": trend_s,
         "_setup": setup_s, "_risk": risk_s,
     })
@@ -337,31 +354,41 @@ st.subheader(f"Top 10 picks — {hold_days}-trading-day outlook")
 proj_rows = []
 for _, r in out.head(10).iterrows():
     t = r["Ticker"]
-    rets, price = rets_map[t], price_map[t]
-    s = pd.Series(rets)
-    med, p25, p75 = s.median(), s.quantile(0.25), s.quantile(0.75)
+    rets, price = rets_map.get(t, []), price_map.get(t)
+    if len(rets) >= 5:
+        s = pd.Series(rets)
+        med, p25, p75 = s.median(), s.quantile(0.25), s.quantile(0.75)
+        target = round(price * (1 + med / 100), 2)
+        rng = (f"{price * (1 + p25 / 100):,.2f} - "
+               f"{price * (1 + p75 / 100):,.2f}")
+        if len(rets) < 20:
+            target, rng = f"{target} *", f"{rng} *"
+        odds = f"{r['Win %']:.0f}%" + (" *" if len(rets) < 20 else "")
+    else:
+        target, rng, odds = "n/a *", "n/a *", "n/a *"
     proj_rows.append({
         "Rank": len(proj_rows) + 1, "Ticker": t, "Grade": r["Grade"],
-        "Score": r["Score"],
-        "Hist up odds": f"{r['Win %']:.0f}%",
+        "Score": r["Score"], "Hist up odds": odds,
         "Price now": round(price, 2),
-        "Target (hist median)": round(price * (1 + med / 100), 2),
-        "Range (25th-75th pct)":
-            f"{price * (1 + p25 / 100):,.2f} - {price * (1 + p75 / 100):,.2f}",
+        "Target (hist median)": target,
+        "Range (25th-75th pct)": rng,
         "Earnings in window": r["Earnings in window"],
     })
 st.dataframe(pd.DataFrame(proj_rows), use_container_width=True,
              hide_index=True)
 st.caption(
+    "\\* Based on stocks for which information was available: entries marked "
+    "with * have fewer years of history than the full-weight threshold — "
+    "their Seasonal pillar was set to a neutral 50 and any target/odds shown "
+    "rest on a thin sample (or n/a if under 5 years). "
     "⚠ 'Target' = current price moved by the stock's MEDIAN historical "
     "return for this exact calendar window; the range spans its 25th-75th "
-    "percentile outcomes. These are historical echoes, not forecasts — "
-    "roughly half of past years finished outside the range shown. "
-    "'Hist up odds' is the past win rate, not a true probability."
+    "percentile outcomes. Historical echoes, not forecasts — roughly half "
+    "of past years finished outside the range shown."
 )
 
 st.subheader("Top 10 detail")
-show_cols = ["Ticker", "Score", "Grade", "Seasonal", "Trend", "Setup", "Risk",
+show_cols = ["Ticker", "Data", "Score", "Grade", "Seasonal", "Trend", "Setup", "Risk",
              "News", "Win %", "Beat %", "t-stat", ">50DMA", ">200DMA",
              "1M %", "RSI14", "RSI2", "AnnVol %", "Earnings in window",
              "News flag"]
