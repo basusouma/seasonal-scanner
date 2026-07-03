@@ -25,7 +25,13 @@ DEFAULT_TICKERS = (
     "PG,KO,PEP,WMT,COST,MCD,NKE,SBUX,HD,LOW,"
     "XOM,CVX,COP,SLB,OXY,GE,HON,CAT,DE,MMM,"
     "BA,LMT,RTX,UPS,FDX,UNP,CSX,DIS,CMCSA,VZ,"
-    "T,TMO,DHR,SYK,ISRG,SO,DUK,NEE,D,LIN"
+    "T,TMO,DHR,SYK,ISRG,SO,DUK,NEE,D,LIN,"
+    # Playbook additions
+    "TEVA,CAH,GH,"                       # healthcare
+    "NOW,RBRK,CRWD,ANET,APH,NFLX,CRDO,PANW,"  # technology
+    "KTOS,RDW,RKLB,"                     # space & defense
+    "FCX,PR,MP,CEG,VST,"                 # energy, metals, minerals
+    "O,EPD,TMUS"                         # defensive tilt
 )
 BENCH, VIX = "^GSPC", "^VIX"
 
@@ -47,7 +53,11 @@ lookback = st.sidebar.slider("Lookback years", 10, 25, 25)
 hold_days = st.sidebar.slider("Holding period (trading days)", 3, 10, 10)
 tickers_text = st.sidebar.text_area("Tickers (comma separated)",
                                     DEFAULT_TICKERS, height=150)
-min_years = st.sidebar.slider("Minimum years of history", 10, 25, 15)
+min_years = st.sidebar.slider(
+    "Minimum years of history", 4, 25, 8,
+    help="Lower this to include young stocks (RKLB, RDW, CEG, PR, CRDO...). "
+         "Warning: seasonal stats on <10 samples are close to meaningless — "
+         "for young names, trust the Trend/Setup/Risk pillars instead.")
 check_extras = st.sidebar.slider("Earnings+news lookups for top N (slower)",
                                  5, 30, 15)
 run = st.sidebar.button("Run scan", type="primary")
@@ -195,7 +205,7 @@ for t in tickers:
     if t not in closes.columns:
         continue
     px = closes[t].dropna()
-    if len(px) < 260:
+    if len(px) < 210:
         continue
     stock = week_returns(px, anchor.month, anchor.day,
                          first_year, this_year - 1, hold_days)
